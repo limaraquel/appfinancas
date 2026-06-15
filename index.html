@@ -108,6 +108,26 @@ main{padding-top:18px}
 .pill{font-size:11px; font-weight:700; padding:3px 8px; border-radius:999px; background:var(--teal-soft); color:var(--ink2)}
 .pill.warn{background:var(--honey-soft); color:var(--honey-d)}
 .pill.done{background:var(--line2); color:var(--muted)}
+.pill.paid{background:#DFF3E4; color:#2F7D4F}
+
+/* check / toggle de pago */
+.chk{border:1.5px solid var(--line); background:#fff; width:30px; height:30px; border-radius:9px; flex:none; display:grid; place-items:center; font-size:15px; color:var(--faint); transition:.15s}
+.chk:hover{border-color:var(--teal)}
+.chk.on{background:#3FAE6A; border-color:#3FAE6A; color:#fff}
+.item.paid-row{opacity:.62}
+.item.paid-row .val{text-decoration:line-through; text-decoration-color:var(--faint)}
+
+/* toggle pílula (desconta sim/não) */
+.tgl{border:1.5px solid var(--line); background:#fff; border-radius:999px; padding:5px 10px; font-size:11.5px; font-weight:700; color:var(--muted); white-space:nowrap; transition:.15s; display:inline-flex; align-items:center; gap:5px}
+.tgl.on{background:var(--honey-soft); border-color:var(--honey); color:var(--honey-d)}
+.tgl.on2{background:var(--teal-soft); border-color:var(--teal); color:var(--ink2)}
+
+/* cabeçalho de cada cartão */
+.cardhead{display:flex; align-items:center; gap:12px; flex-wrap:wrap}
+.cardhead .nm{font-family:"Bricolage Grotesque"; font-weight:800; font-size:18px; color:var(--ink)}
+.cardhead .due{font-size:12px; color:var(--muted)}
+.cardhead .amt{font-family:"Spline Sans Mono"; font-weight:700; font-size:20px; margin-left:auto}
+.cardctl{display:flex; flex-wrap:wrap; gap:8px; margin-top:12px}
 
 .total-row{display:flex; justify-content:space-between; align-items:center; margin-top:16px; padding-top:14px; border-top:2px solid var(--line)}
 .total-row span{font-weight:700; color:var(--muted); font-size:13px; text-transform:uppercase; letter-spacing:.06em}
@@ -186,7 +206,7 @@ function todayISO(){return new Date().toISOString().slice(0,10);}
 function toast(msg){const t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');clearTimeout(t._t);t._t=setTimeout(()=>t.classList.remove('show'),1900);}
 
 /* ---------------- state ---------------- */
-const S={view:'painel', month:'2026-07', cfg:null, fixos:[], parcelas:[], dividas:[], gastos:[], cartao:[], newCat:'Alimentação', editing:null, editingCfg:false};
+const S={view:'painel', month:'2026-07', cfg:null, fixos:[], parcelas:[], dividas:[], gastos:[], cartao:[], cartoes:[], newCat:'Alimentação', newCartao:null, editing:null, editingCfg:false};
 const CATS=['Alimentação','Transporte','Lazer','Compras','Saúde','Contas','Outros'];
 const CATIC={'Alimentação':'🍔','Transporte':'⛽','Lazer':'🎉','Compras':'🛍️','Saúde':'💊','Contas':'🧾','Outros':'✦'};
 
@@ -214,12 +234,23 @@ async function seedIfEmpty(){
     ]);
     await store.set('gastos',[]);
     await store.set('cartao',[]);
+    await store.set('cartoes',[
+      {id:uid(),nome:'Nubank',venc:10,descontaSalario:true,pagos:{}},
+      {id:uid(),nome:'Inter',venc:15,descontaSalario:true,pagos:{}},
+    ]);
   }
 }
 async function loadAll(){
   S.cfg=await store.get('cfg'); S.fixos=await store.get('fixos')||[];
   S.parcelas=await store.get('parcelas')||[]; S.dividas=await store.get('dividas')||[];
   S.gastos=await store.get('gastos')||[]; S.cartao=await store.get('cartao')||[];
+  S.cartoes=await store.get('cartoes')||[];
+  // migração suave para quem já usava o app antes desta atualização
+  let migrou=false;
+  S.fixos.forEach(f=>{ if(!f.pagos){f.pagos={};migrou=true;} });
+  if(migrou) await store.set('fixos',S.fixos);
+  S.cartoes.forEach(c=>{ if(c.descontaSalario===undefined)c.descontaSalario=true; if(!c.pagos)c.pagos={}; });
+  if(S.newCartao===null && S.cartoes.length) S.newCartao=S.cartoes[0].id;
 }
 
 /* ---------------- computations for selected month ---------------- */
@@ -229,9 +260,24 @@ function totalFixos(){ return S.fixos.reduce((s,f)=>s+(+f.valor||0),0); }
 function totalParcelasMes(){ return parcelasAtivas().reduce((s,p)=>s+(+p.valor||0),0); }
 function cartaoMes(){ return S.cartao.filter(c=>c.fatura===S.month); }
 function totalCartaoMes(){ return cartaoMes().reduce((s,c)=>s+(+c.valor||0),0); }
+function comprasDoCartao(cartaoId){ return cartaoMes().filter(c=>(c.cartaoId||null)===cartaoId); }
+function faturaCartao(cartaoId){ return comprasDoCartao(cartaoId).reduce((s,c)=>s+(+c.valor||0),0); }
+function cartaoPago(cartaoId){ const c=S.cartoes.find(x=>x.id===cartaoId); return !!(c&&c.pagos&&c.pagos[S.month]); }
+function comprasSemCartao(){ const ids=S.cartoes.map(c=>c.id); return cartaoMes().filter(c=>!c.cartaoId||!ids.includes(c.cartaoId)); }
+// total das faturas que descontam do salário (entram em "a pagar / sobra")
+function totalCartaoSalario(){
+  let t=0;
+  S.cartoes.forEach(c=>{ if(c.descontaSalario!==false) t+=faturaCartao(c.id); });
+  t+=comprasSemCartao().reduce((s,c)=>s+(+c.valor||0),0); // compras sem cartão sempre contam
+  return t;
+}
+// compras de cartão marcadas para descontar do limite de gastar livre
+function gastosCartaoDescontam(){ return cartaoMes().filter(c=>c.descontaGastar).reduce((s,c)=>s+(+c.valor||0),0); }
+function fixoPago(f){ return !!(f.pagos&&f.pagos[S.month]); }
+function totalFixosPagos(){ return S.fixos.filter(fixoPago).reduce((s,f)=>s+(+f.valor||0),0); }
 function gastosMes(){ return S.gastos.filter(g=>g.data && g.data.slice(0,7)===S.month); }
 function totalGastosMes(){ return gastosMes().reduce((s,g)=>s+(+g.valor||0),0); }
-function totalAPagar(){ return totalFixos()+totalParcelasMes()+totalCartaoMes(); }
+function totalAPagar(){ return totalFixos()+totalParcelasMes()+totalCartaoSalario(); }
 
 /* ---------------- inline edit rows ---------------- */
 function editGastoRow(g){return `<div class="erow"><div class="frow">
@@ -242,14 +288,25 @@ function editGastoRow(g){return `<div class="erow"><div class="frow">
   <button class="btn honey sm" onclick="saveEdit('gasto','${g.id}')">Salvar</button>
   <button class="btn ghost sm" onclick="cancelEdit()">Cancelar</button>
 </div></div>`;}
-function editCartaoRow(c){return `<div class="erow"><div class="frow">
+function editCartaoRow(c){const opts=S.cartoes.map(x=>`<option value="${x.id}" ${(c.cartaoId||'')===x.id?'selected':''}>${esc(x.nome)}</option>`).join('');return `<div class="erow"><div class="frow">
+  <div class="field"><label>Cartão</label><select id="e_card"><option value="">— sem cartão —</option>${opts}</select></div>
   <div class="field grow"><label>Compra</label><input id="e_desc" value="${esc(c.desc)}"></div>
   <div class="field"><label>Valor</label><input id="e_val" type="number" step="0.01" value="${c.valor}"></div>
   <div class="field"><label>Data</label><input id="e_data" type="date" value="${c.data||''}"></div>
   <div class="field"><label>Fatura de</label><input id="e_fat" type="month" value="${c.fatura}"></div>
+  <div class="field" style="flex:0 1 200px"><label>Desconta do limite?</label>
+    <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;color:var(--ink2);padding:6px 0">
+      <input id="e_gastar" type="checkbox" ${c.descontaGastar?'checked':''} style="width:18px;height:18px;accent-color:var(--honey)"> Tira dos ${fmt(S.cfg.gastar)}
+    </label></div>
   <button class="btn honey sm" onclick="saveEdit('cartao','${c.id}')">Salvar</button>
   <button class="btn ghost sm" onclick="cancelEdit()">Cancelar</button>
 </div></div>`;}
+function editCartCfgRow(c){return `<div class="card fade" style="margin-top:14px"><div class="erow" style="margin:0"><div class="frow">
+  <div class="field grow"><label>Nome do cartão</label><input id="ec_nome" value="${esc(c.nome)}"></div>
+  <div class="field" style="flex:0 1 130px"><label>Dia do vencimento</label><input id="ec_venc" type="number" min="1" max="31" value="${c.venc||''}"></div>
+  <button class="btn honey sm" onclick="saveEdit('cartcfg','${c.id}')">Salvar</button>
+  <button class="btn ghost sm" onclick="cancelEdit()">Cancelar</button>
+</div></div></div>`;}
 function editFixoRow(f){return `<div class="erow"><div class="frow">
   <div class="field grow"><label>Nome</label><input id="e_nome" value="${esc(f.nome)}"></div>
   <div class="field"><label>Valor mensal</label><input id="e_val" type="number" step="0.01" value="${f.valor}"></div>
@@ -270,7 +327,8 @@ window.startEdit=(type,id)=>{S.editing={type,id};render();};
 window.cancelEdit=()=>{S.editing=null;render();};
 window.saveEdit=async(type,id)=>{
   if(type==='gasto'){const g=S.gastos.find(x=>x.id===id);if(!g)return;const d=val('e_desc'),v=num('e_val');if(!d||!v){toast('Preencha o que foi e o valor');return;}g.desc=d;g.valor=v;g.data=val('e_data')||g.data;g.cat=val('e_cat');await store.set('gastos',S.gastos);}
-  else if(type==='cartao'){const c=S.cartao.find(x=>x.id===id);if(!c)return;const d=val('e_desc'),v=num('e_val');if(!d||!v){toast('Preencha a compra e o valor');return;}c.desc=d;c.valor=v;c.data=val('e_data');c.fatura=val('e_fat')||c.fatura;await store.set('cartao',S.cartao);}
+  else if(type==='cartao'){const c=S.cartao.find(x=>x.id===id);if(!c)return;const d=val('e_desc'),v=num('e_val');if(!d||!v){toast('Preencha a compra e o valor');return;}c.desc=d;c.valor=v;c.data=val('e_data');c.fatura=val('e_fat')||c.fatura;c.cartaoId=val('e_card')||null;c.descontaGastar=!!document.getElementById('e_gastar')?.checked;await store.set('cartao',S.cartao);}
+  else if(type==='cartcfg'){const c=S.cartoes.find(x=>x.id===id);if(!c)return;const n=val('ec_nome');if(!n){toast('Preencha o nome do cartão');return;}c.nome=n;c.venc=parseInt(val('ec_venc'))||c.venc;await store.set('cartoes',S.cartoes);}
   else if(type==='fixo'){const f=S.fixos.find(x=>x.id===id);if(!f)return;const n=val('e_nome'),v=num('e_val');if(!n||!v){toast('Preencha nome e valor');return;}f.nome=n;f.valor=v;await store.set('fixos',S.fixos);}
   else if(type==='parcela'){const p=S.parcelas.find(x=>x.id===id);if(!p)return;const n=val('e_nome'),v=num('e_val');if(!n||!v){toast('Preencha compra e valor');return;}p.nome=n;p.banco=val('e_banco')||'—';p.valor=v;p.atual=parseInt(val('e_at'))||1;p.total=parseInt(val('e_tot'))||1;p.ref=S.month;await store.set('parcelas',S.parcelas);}
   S.editing=null;toast('Salvo ✨');render();
@@ -281,7 +339,8 @@ window.saveCfg=async()=>{S.cfg.salary=num('cf_sal');S.cfg.va=num('cf_va');S.cfg.
 
 /* ---------------- views ---------------- */
 function vPainel(){
-  const fix=totalFixos(), par=totalParcelasMes(), cart=totalCartaoMes(), gv=totalGastosMes();
+  const fix=totalFixos(), par=totalParcelasMes(), cart=totalCartaoSalario();
+  const gv=totalGastosMes()+gastosCartaoDescontam();
   const aPagar=fix+par+cart;
   const gastarRest=S.cfg.gastar-gv;
   const pct=Math.min(100, Math.max(0,(gv/S.cfg.gastar)*100));
@@ -362,7 +421,7 @@ function vPainel(){
 
 function vGastos(){
   const list=gastosMes().sort((a,b)=>b.data.localeCompare(a.data));
-  const total=totalGastosMes(), rest=S.cfg.gastar-total;
+  const total=totalGastosMes(), cartDesc=gastosCartaoDescontam(), rest=S.cfg.gastar-total-cartDesc;
   return `
   <div class="section-title fade"><h2>🛍️ Gastos do mês</h2>
     <span class="hint">o que você gasta no dia a dia (conta/pix/débito)</span></div>
@@ -374,7 +433,7 @@ function vGastos(){
       <button class="btn honey" onclick="addGasto()">Lançar gasto</button>
     </div>
     <div class="cats" id="g_cats">${CATS.map(c=>`<button class="cat ${c===S.newCat?'on':''}" onclick="pickCat('${c}')">${CATIC[c]} ${c}</button>`).join('')}</div>
-    <div class="note">Cada lançamento desconta do seu limite de <b>${fmt(S.cfg.gastar)}</b>. Restam <b class="mono" style="color:${rest<0?'var(--clay)':'var(--teal)'}">${fmt(rest)}</b> neste mês.</div>
+    <div class="note">Cada lançamento desconta do seu limite de <b>${fmt(S.cfg.gastar)}</b>${cartDesc>0?` (+ ${fmt(cartDesc)} de compras no cartão marcadas)`:''}. Restam <b class="mono" style="color:${rest<0?'var(--clay)':'var(--teal)'}">${fmt(rest)}</b> neste mês.</div>
   </div>
   <div class="card fade">
     ${list.length?`<div class="list">${list.map(g=> (S.editing&&S.editing.type==='gasto'&&S.editing.id===g.id) ? editGastoRow(g) : `
@@ -391,56 +450,117 @@ function vGastos(){
 }
 
 function vCartao(){
-  const list=cartaoMes().sort((a,b)=>(b.data||'').localeCompare(a.data||''));
-  const total=totalCartaoMes();
+  const totalGeral=totalCartaoMes();
+  const cards=S.cartoes;
+  const semCartao=comprasSemCartao();
+  // opções do select de cartão no formulário
+  const opts=cards.map(c=>`<option value="${c.id}" ${S.newCartao===c.id?'selected':''}>${esc(c.nome)}</option>`).join('');
+
+  // bloco de um cartão
+  function blocoCartao(c){
+    const compras=comprasDoCartao(c.id).sort((a,b)=>(b.data||'').localeCompare(a.data||''));
+    const fatura=faturaCartao(c.id);
+    const pago=cartaoPago(c.id);
+    const salario=c.descontaSalario!==false;
+    if(S.editing&&S.editing.type==='cartcfg'&&S.editing.id===c.id) return editCartCfgRow(c);
+    return `<div class="card fade" style="margin-top:14px">
+      <div class="cardhead">
+        <span class="nm">💳 ${esc(c.nome)}</span>
+        <span class="due">vence dia ${c.venc||'—'}</span>
+        ${pago?'<span class="pill paid">paga ✓</span>':''}
+        <span class="amt" style="color:${pago?'var(--muted)':'var(--ink)'}">${fmtC(fatura)}</span>
+      </div>
+      <div class="cardctl">
+        <button class="chk ${pago?'on':''}" onclick="toggleCartaoPago('${c.id}')" title="Marcar fatura como paga">${pago?'✓':''}</button>
+        <button class="tgl ${pago?'':'on'}" onclick="toggleCartaoPago('${c.id}')">${pago?'Paga neste mês':'Marcar como paga'}</button>
+        <button class="tgl ${salario?'on2':''}" onclick="toggleCartaoSalario('${c.id}')">${salario?'⬇️ Desconta do salário':'🚫 Não desconta do salário'}</button>
+        <button class="btn ghost sm" onclick="startEdit('cartcfg','${c.id}')">✏️ Editar cartão</button>
+        <button class="btn ghost sm" onclick="delCartaoNome('${c.id}')">🗑️ Excluir</button>
+      </div>
+      ${compras.length?`<div class="list" style="margin-top:10px">${compras.map(p=> (S.editing&&S.editing.type==='cartao'&&S.editing.id===p.id) ? editCartaoRow(p) : `
+        <div class="item">
+          <div class="ic">🧾</div>
+          <div class="main"><b>${esc(p.desc)}</b><small>${p.data?fmtDate(p.data):'sem data'}</small></div>
+          <button class="tgl ${p.descontaGastar?'on':''}" onclick="toggleGastoDesconta('${p.id}')" title="Desconta do seu limite de gastar?">${p.descontaGastar?'sai do limite':'fora do limite'}</button>
+          <div class="val">${fmtC(p.valor)}</div>
+          <button class="x" onclick="startEdit('cartao','${p.id}')" aria-label="Editar" title="Editar">✏️</button>
+          <button class="x" onclick="delCartao('${p.id}')" aria-label="Remover" title="Remover">×</button>
+        </div>`).join('')}</div>`
+      :`<div class="empty" style="padding:18px"><div class="big">🧾</div>Sem compras nesta fatura.</div>`}
+    </div>`;
+  }
+
   return `
-  <div class="section-title fade"><h2>💳 Cartão de crédito</h2>
-    <span class="hint">compras variáveis · viram a fatura do mês</span></div>
-  <div class="adder fade">
-    <div class="frow">
-      <div class="field grow"><label>Compra</label><input id="c_desc" placeholder="Ex: tênis, mercado, ifood"></div>
-      <div class="field"><label>Valor</label><input id="c_val" type="number" inputmode="decimal" step="0.01" placeholder="0,00"></div>
-      <div class="field"><label>Data da compra</label><input id="c_data" type="date" value="${todayISO()}"></div>
-      <div class="field"><label>Cai na fatura de</label><input id="c_fat" type="month" value="${S.month}"></div>
-      <button class="btn honey" onclick="addCartao()">Adicionar</button>
-    </div>
-    <div class="note">Lance aqui as compras parceladas ou avulsas do cartão. O total da fatura aparece no <b>Painel</b> e em “A pagar no mês”.</div>
+  <div class="section-title fade"><h2>💳 Cartões</h2>
+    <span class="hint">uma fatura por cartão · ${monthLabel(S.month)}</span></div>
+
+  <div class="adder fade"><div class="frow">
+    <div class="field grow"><label>Nome do cartão</label><input id="cn_nome" placeholder="Ex: Nubank, Itaú..."></div>
+    <div class="field" style="flex:0 1 130px"><label>Dia do vencimento</label><input id="cn_venc" type="number" min="1" max="31" placeholder="Ex: 10"></div>
+    <button class="btn" onclick="addCartaoNome()">+ Cartão</button>
+  </div><div class="note">Cadastre cada cartão com o dia que a fatura vence. Depois lance as compras escolhendo o cartão.</div></div>
+
+  ${cards.length?`<div class="adder fade"><div class="frow">
+    <div class="field"><label>Cartão</label><select id="c_card">${opts}</select></div>
+    <div class="field grow"><label>Compra</label><input id="c_desc" placeholder="Ex: tênis, mercado, ifood"></div>
+    <div class="field"><label>Valor</label><input id="c_val" type="number" inputmode="decimal" step="0.01" placeholder="0,00"></div>
+    <div class="field"><label>Data da compra</label><input id="c_data" type="date" value="${todayISO()}"></div>
+    <div class="field"><label>Cai na fatura de</label><input id="c_fat" type="month" value="${S.month}"></div>
+    <div class="field" style="flex:0 1 200px"><label>Desconta do limite de gastar?</label>
+      <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;color:var(--ink2);padding:6px 0">
+        <input id="c_gastar" type="checkbox" style="width:18px;height:18px;accent-color:var(--honey)"> Sim, tira dos ${fmt(S.cfg.gastar)}
+      </label></div>
+    <button class="btn honey" onclick="addCartao()">Adicionar compra</button>
+  </div></div>`:`<div class="note fade" style="text-align:center;margin-bottom:14px">👆 Cadastre um cartão acima para começar a lançar compras.</div>`}
+
+  <div class="card fade" style="background:linear-gradient(155deg,#F286B0,#A23E6A);color:#fff;border:none">
+    <div class="eyebrow" style="color:rgba(255,255,255,.6)">Total de todos os cartões em ${monthLabel(S.month)}</div>
+    <div style="font-family:'Bricolage Grotesque';font-weight:800;font-size:34px;margin:6px 0 2px" class="mono">${fmtC(totalGeral)}</div>
+    <div class="sub" style="font-size:12px;color:rgba(255,255,255,.72)">Cada cartão abaixo mostra a própria fatura, se já foi paga e se desconta do salário.</div>
   </div>
-  <div class="card fade">
-    <div class="eyebrow">Fatura de ${monthLabel(S.month)}</div>
-    <div style="font-family:'Bricolage Grotesque';font-weight:800;font-size:32px;color:var(--ink);margin:6px 0 4px" class="mono">${fmt(total)}</div>
-    ${list.length?`<div class="list" style="margin-top:8px">${list.map(c=> (S.editing&&S.editing.type==='cartao'&&S.editing.id===c.id) ? editCartaoRow(c) : `
+
+  ${cards.map(blocoCartao).join('')}
+
+  ${semCartao.length?`<div class="card fade" style="margin-top:14px">
+    <div class="cardhead"><span class="nm">❔ Sem cartão</span><span class="amt">${fmtC(semCartao.reduce((s,c)=>s+(+c.valor||0),0))}</span></div>
+    <div class="note">Compras antigas sem cartão definido. Edite cada uma para escolher um cartão.</div>
+    <div class="list" style="margin-top:10px">${semCartao.sort((a,b)=>(b.data||'').localeCompare(a.data||'')).map(p=> (S.editing&&S.editing.type==='cartao'&&S.editing.id===p.id) ? editCartaoRow(p) : `
       <div class="item">
-        <div class="ic">💳</div>
-        <div class="main"><b>${esc(c.desc)}</b><small>${c.data?fmtDate(c.data):'sem data'}</small></div>
-        <div class="val">${fmtC(c.valor)}</div>
-        <button class="x" onclick="startEdit('cartao','${c.id}')" aria-label="Editar" title="Editar">✏️</button>
-        <button class="x" onclick="delCartao('${c.id}')" aria-label="Remover" title="Remover">×</button>
-      </div>`).join('')}</div>`
-    :`<div class="empty" style="padding:22px"><div class="big">💳</div>Sem compras nesta fatura ainda.</div>`}
-  </div>
-  <div class="note fade" style="text-align:center">Use ‹ › lá em cima para ver a fatura de outros meses.</div>`;
+        <div class="ic">🧾</div>
+        <div class="main"><b>${esc(p.desc)}</b><small>${p.data?fmtDate(p.data):'sem data'}</small></div>
+        <div class="val">${fmtC(p.valor)}</div>
+        <button class="x" onclick="startEdit('cartao','${p.id}')" aria-label="Editar" title="Editar">✏️</button>
+        <button class="x" onclick="delCartao('${p.id}')" aria-label="Remover" title="Remover">×</button>
+      </div>`).join('')}</div>
+  </div>`:''}
+
+  <div class="note fade" style="text-align:center;margin-top:14px">Use ‹ › lá em cima para ver as faturas de outros meses.</div>`;
 }
 
 function vFixos(){
   const list=S.fixos, total=totalFixos();
+  const pagos=totalFixosPagos(), falta=total-pagos;
+  const nPagos=list.filter(fixoPago).length;
   return `
-  <div class="section-title fade"><h2>📌 Gastos fixos</h2><span class="hint">se repetem todo mês</span></div>
+  <div class="section-title fade"><h2>📌 Gastos fixos</h2><span class="hint">${nPagos}/${list.length} pagos em ${monthLabel(S.month)}</span></div>
   <div class="adder fade"><div class="frow">
     <div class="field grow"><label>Nome</label><input id="f_nome" placeholder="Ex: Internet"></div>
     <div class="field"><label>Valor mensal</label><input id="f_val" type="number" inputmode="decimal" step="0.01" placeholder="0,00"></div>
     <button class="btn" onclick="addFixo()">Adicionar</button>
-  </div></div>
+  </div><div class="note">Toque no quadradinho ✓ de cada fixo para marcar que já pagou neste mês. O status é guardado por mês.</div></div>
   <div class="card fade">
     <div class="list">${list.map(f=> (S.editing&&S.editing.type==='fixo'&&S.editing.id===f.id) ? editFixoRow(f) : `
-      <div class="item">
-        <div class="ic">📌</div>
-        <div class="main"><b>${esc(f.nome)}</b></div>
+      <div class="item ${fixoPago(f)?'paid-row':''}">
+        <button class="chk ${fixoPago(f)?'on':''}" onclick="toggleFixoPago('${f.id}')" aria-label="Marcar como pago" title="Já paguei este mês">${fixoPago(f)?'✓':''}</button>
+        <div class="main"><b>${esc(f.nome)}</b><small>${fixoPago(f)?'pago neste mês':'em aberto'}</small></div>
         <div class="val">${fmtC(f.valor)}</div>
         <button class="x" onclick="startEdit('fixo','${f.id}')" aria-label="Editar" title="Editar">✏️</button>
         <button class="x" onclick="delFixo('${f.id}')" aria-label="Remover" title="Remover">×</button>
       </div>`).join('')}</div>
     <div class="total-row"><span>Total fixo por mês</span><b class="mono">${fmtC(total)}</b></div>
+    <div class="row" style="display:flex;justify-content:space-between;font-size:13px;color:var(--muted);margin-top:8px">
+      <span>Já pago: <b class="mono" style="color:#3FAE6A">${fmtC(pagos)}</b></span>
+      <span>Falta pagar: <b class="mono" style="color:${falta>0?'var(--clay)':'#3FAE6A'}">${fmtC(falta)}</b></span></div>
   </div>`;
 }
 
@@ -517,10 +637,16 @@ const num=id=>parseFloat((document.getElementById(id)?.value||'').replace(',','.
 window.pickCat=c=>{S.newCat=c; document.querySelectorAll('#g_cats .cat').forEach(b=>b.classList.toggle('on',b.textContent.trim().endsWith(c)));};
 window.addGasto=async()=>{const desc=val('g_desc'),v=num('g_val'),data=val('g_data');if(!desc||!v){toast('Preencha o que foi e o valor');return;}S.gastos.push({id:uid(),desc,valor:v,data:data||todayISO(),cat:S.newCat});await store.set('gastos',S.gastos);toast('Gasto lançado');render();};
 window.delGasto=async id=>{S.gastos=S.gastos.filter(g=>g.id!==id);await store.set('gastos',S.gastos);render();};
-window.addCartao=async()=>{const desc=val('c_desc'),v=num('c_val'),data=val('c_data'),fat=val('c_fat');if(!desc||!v){toast('Preencha a compra e o valor');return;}S.cartao.push({id:uid(),desc,valor:v,data,fatura:fat||S.month});await store.set('cartao',S.cartao);toast('Adicionado à fatura');render();};
+window.addCartao=async()=>{const cardId=val('c_card')||S.newCartao||null,desc=val('c_desc'),v=num('c_val'),data=val('c_data'),fat=val('c_fat');const gastar=!!document.getElementById('c_gastar')?.checked;if(!desc||!v){toast('Preencha a compra e o valor');return;}S.cartao.push({id:uid(),cartaoId:cardId,desc,valor:v,data,fatura:fat||S.month,descontaGastar:gastar});await store.set('cartao',S.cartao);toast('Adicionado à fatura');render();};
 window.delCartao=async id=>{S.cartao=S.cartao.filter(c=>c.id!==id);await store.set('cartao',S.cartao);render();};
+window.addCartaoNome=async()=>{const nome=val('cn_nome'),venc=parseInt(val('cn_venc'))||null;if(!nome){toast('Dê um nome ao cartão');return;}const c={id:uid(),nome,venc,descontaSalario:true,pagos:{}};S.cartoes.push(c);S.newCartao=c.id;await store.set('cartoes',S.cartoes);toast('Cartão cadastrado 💳');render();};
+window.delCartaoNome=async id=>{const c=S.cartoes.find(x=>x.id===id);if(!c)return;if(!confirm('Excluir o cartão "'+c.nome+'"? As compras dele viram "sem cartão", não são apagadas.'))return;S.cartoes=S.cartoes.filter(x=>x.id!==id);if(S.newCartao===id)S.newCartao=S.cartoes[0]?.id||null;await store.set('cartoes',S.cartoes);toast('Cartão excluído');render();};
+window.toggleCartaoPago=async id=>{const c=S.cartoes.find(x=>x.id===id);if(!c)return;if(!c.pagos)c.pagos={};c.pagos[S.month]=!c.pagos[S.month];await store.set('cartoes',S.cartoes);toast(c.pagos[S.month]?'Fatura marcada como paga ✓':'Fatura marcada como não paga');render();};
+window.toggleCartaoSalario=async id=>{const c=S.cartoes.find(x=>x.id===id);if(!c)return;c.descontaSalario=c.descontaSalario===false?true:false;await store.set('cartoes',S.cartoes);toast(c.descontaSalario?'Vai descontar do salário':'Não desconta do salário');render();};
+window.toggleGastoDesconta=async id=>{const p=S.cartao.find(x=>x.id===id);if(!p)return;p.descontaGastar=!p.descontaGastar;await store.set('cartao',S.cartao);toast(p.descontaGastar?'Sai do seu limite de gastar':'Fora do limite de gastar');render();};
 window.addFixo=async()=>{const nome=val('f_nome'),v=num('f_val');if(!nome||!v){toast('Preencha nome e valor');return;}S.fixos.push({id:uid(),nome,valor:v});await store.set('fixos',S.fixos);toast('Fixo adicionado');render();};
 window.delFixo=async id=>{S.fixos=S.fixos.filter(f=>f.id!==id);await store.set('fixos',S.fixos);render();};
+window.toggleFixoPago=async id=>{const f=S.fixos.find(x=>x.id===id);if(!f)return;if(!f.pagos)f.pagos={};f.pagos[S.month]=!f.pagos[S.month];await store.set('fixos',S.fixos);render();};
 window.addParcela=async()=>{const nome=val('p_nome'),banco=val('p_banco'),v=num('p_val'),at=parseInt(val('p_at'))||1,tot=parseInt(val('p_tot'))||1;if(!nome||!v){toast('Preencha compra e valor');return;}S.parcelas.push({id:uid(),nome,banco:banco||'—',valor:v,atual:at,total:tot,ref:S.month});await store.set('parcelas',S.parcelas);toast('Parcelamento adicionado');render();};
 window.delParcela=async id=>{S.parcelas=S.parcelas.filter(p=>p.id!==id);await store.set('parcelas',S.parcelas);render();};
 window.addDivida=async()=>{const credor=val('d_cred'),v=num('d_val');if(!credor||!v){toast('Preencha credor e valor');return;}const ordem=S.dividas.length+1;S.dividas.push({id:uid(),credor,ini:v,rest:v,tipo:'Adicionada',ordem});await store.set('dividas',S.dividas);toast('Dívida adicionada');render();};
@@ -529,7 +655,7 @@ window.editDivida=async id=>{const d=S.dividas.find(x=>x.id===id);if(!d)return;c
 window.delDivida=async id=>{const d=S.dividas.find(x=>x.id===id);if(d&&!confirm('Remover a dívida com '+d.credor+'? Ela some do app.'))return;S.dividas=S.dividas.filter(x=>x.id!==id);await store.set('dividas',S.dividas);toast('Dívida removida');render();};
 
 /* ---------------- render ---------------- */
-const VIEWS=[['painel','🏠 Painel'],['gastos','🛍️ Gastos do mês'],['cartao','💳 Cartão'],['fixos','📌 Fixos'],['parcelas','🧾 Parcelas'],['dividas','🎯 Dívidas']];
+const VIEWS=[['painel','🏠 Painel'],['gastos','🛍️ Gastos do mês'],['cartao','💳 Cartões'],['fixos','📌 Fixos'],['parcelas','🧾 Parcelas'],['dividas','🎯 Dívidas']];
 function renderTabs(){document.getElementById('tabs').innerHTML=VIEWS.map(([k,l])=>`<button class="tab ${S.view===k?'on':''}" onclick="go('${k}')">${l}</button>`).join('');}
 window.go=k=>{S.view=k;render();window.scrollTo({top:0,behavior:'smooth'});};
 function render(){
